@@ -3072,6 +3072,80 @@ struct xml_parser
 
   ~xml_parser() { *alloc_state = alloc; }
 
+  inline std::vector<std::pair<gsl::string_span<>, gsl::string_span<>>>
+    get_all_attributes(xml_node_struct * node)
+  {
+    auto attributes = std::vector<std::pair<gsl::string_span<>, gsl::string_span<>>>{};
+
+    auto * attr = node->first_attribute;
+
+    if (attr)
+    {
+      do
+      {
+        if (attr->name[0] == 'x' && attr->name[1] == 'm' && attr->name[2] == 'l' &&
+            attr->name[3] == 'n' && attr->name[4] == 's' && functions.on_namespace_start)
+          functions.on_namespace_start(gsl::ensure_z(&attr->name[6]), gsl::ensure_z(attr->value));
+        else
+          attributes.emplace_back(
+            std::make_pair(gsl::ensure_z(attr->name), gsl::ensure_z(attr->value)));
+
+        attr = attr->next_attribute;
+      } while (attr);
+    }
+
+    return attributes;
+  }
+
+  inline xml_attribute_struct * get_namespace_attribute(xml_node_struct * node)
+  {
+    auto * attr = node->first_attribute;
+
+    if (attr)
+    {
+      do
+      {
+        if (attr->name[0] == 'x' && attr->name[1] == 'm' && attr->name[2] == 'l' &&
+            attr->name[3] == 'n' && attr->name[4] == 's')
+          return attr;
+
+        attr = attr->next_attribute;
+      } while (attr);
+    }
+
+    return nullptr;
+  }
+
+  inline void on_element_start(xml_node_struct * node)
+  {
+    auto attributes = get_all_attributes(node);
+
+    if (functions.on_element_start)
+      functions.on_element_start(gsl::ensure_z(node->name), attributes);
+  }
+
+  inline void on_element_end(xml_node_struct * node)
+  {
+    if (functions.on_element_end)
+      functions.on_element_end(gsl::ensure_z(node->name));
+
+    if (functions.on_namespace_end)
+    {
+      auto ns = get_namespace_attribute(node);
+
+      if (ns)
+        functions.on_namespace_end(gsl::ensure_z(&ns->name[6]), gsl::ensure_z(ns->value));
+    }
+  }
+
+  inline void on_xml_decl(xml_node_struct * node)
+  {
+    auto attributes = get_all_attributes(node);
+
+    if (functions.on_xml_decl)
+      functions.on_xml_decl(gsl::ensure_z(node->name), attributes);
+  }
+
   // DOCTYPE consists of nested sections of the following possible types:
   // <!-- ... -->, <? ... ?>, "...", '...'
   // <![...]]>
@@ -3474,17 +3548,14 @@ struct xml_parser
 
           if (ch == '>')
           {
-            if (PUGI__NODETYPE(cursor) == node_element && functions.on_element_start)
-              functions.on_element_start(
-                gsl::ensure_z(cursor->name),
-                gsl::span<std::pair<gsl::string_span<>, gsl::string_span<>>>{});
+            if (PUGI__NODETYPE(cursor) == node_element)
+              on_element_start(cursor);
 
             // end of tag
           }
           else if (PUGI__IS_CHARTYPE(ch, ct_space))
           {
           LOC_ATTRIBUTES:
-            auto attributes = std::vector<std::pair<gsl::string_span<>, gsl::string_span<>>>{};
             while (true)
             {
               PUGI__SKIPWS(); // Eat any whitespace.
@@ -3535,25 +3606,21 @@ struct xml_parser
                 }
                 else
                   PUGI__THROW_ERROR(status_bad_attribute, s);
-
-                attributes.emplace_back(
-                  std::make_pair(gsl::ensure_z(a->name), gsl::ensure_z(a->value)));
               }
               else if (*s == '/')
               {
                 ++s;
 
-                if (PUGI__NODETYPE(cursor) == node_element && functions.on_element_start)
-                  functions.on_element_start(gsl::ensure_z(cursor->name), attributes);
+                if (PUGI__NODETYPE(cursor) == node_element)
+                  on_element_start(cursor);
 
                 if (*s == '>')
                 {
-                  if (PUGI__NODETYPE(cursor) == node_declaration &&
-                      PUGI__OPTSET(parse_declaration) && functions.on_xml_decl)
-                    functions.on_xml_decl(gsl::ensure_z(cursor->name), attributes);
+                  if (PUGI__NODETYPE(cursor) == node_declaration && PUGI__OPTSET(parse_declaration))
+                    on_xml_decl(cursor);
 
-                  if (PUGI__NODETYPE(cursor) != node_declaration && functions.on_element_end)
-                    functions.on_element_end(gsl::ensure_z(cursor->name));
+                  if (PUGI__NODETYPE(cursor) != node_declaration)
+                    on_element_end(cursor);
 
                   PUGI__POPNODE();
                   s++;
@@ -3561,12 +3628,11 @@ struct xml_parser
                 }
                 else if (*s == 0 && endch == '>')
                 {
-                  if (PUGI__NODETYPE(cursor) == node_declaration &&
-                      PUGI__OPTSET(parse_declaration) && functions.on_xml_decl)
-                    functions.on_xml_decl(gsl::ensure_z(cursor->name), attributes);
+                  if (PUGI__NODETYPE(cursor) == node_declaration && PUGI__OPTSET(parse_declaration))
+                    on_xml_decl(cursor);
 
-                  if (PUGI__NODETYPE(cursor) != node_declaration && functions.on_element_end)
-                    functions.on_element_end(gsl::ensure_z(cursor->name));
+                  if (PUGI__NODETYPE(cursor) != node_declaration)
+                    on_element_end(cursor);
 
                   PUGI__POPNODE();
                   break;
@@ -3578,15 +3644,15 @@ struct xml_parser
               {
                 ++s;
 
-                if (PUGI__NODETYPE(cursor) == node_element && functions.on_element_start)
-                  functions.on_element_start(gsl::ensure_z(cursor->name), attributes);
+                if (PUGI__NODETYPE(cursor) == node_element)
+                  on_element_start(cursor);
 
                 break;
               }
               else if (*s == 0 && endch == '>')
               {
-                if (PUGI__NODETYPE(cursor) == node_element && functions.on_element_start)
-                  functions.on_element_start(gsl::ensure_z(cursor->name), attributes);
+                if (PUGI__NODETYPE(cursor) == node_element)
+                  on_element_start(cursor);
 
                 break;
               }
@@ -3601,13 +3667,10 @@ struct xml_parser
             if (!PUGI__ENDSWITH(*s, '>'))
               PUGI__THROW_ERROR(status_bad_start_element, s);
 
-            if (PUGI__NODETYPE(cursor) == node_element && functions.on_element_start)
-              functions.on_element_start(
-                gsl::ensure_z(cursor->name),
-                gsl::span<std::pair<gsl::string_span<>, gsl::string_span<>>>{});
+            if (PUGI__NODETYPE(cursor) == node_element)
+              on_element_start(cursor);
 
-            if (functions.on_element_end)
-              functions.on_element_end(gsl::ensure_z(cursor->name));
+            on_element_end(cursor);
 
             PUGI__POPNODE(); // Pop.
 
@@ -3647,8 +3710,7 @@ struct xml_parser
               PUGI__THROW_ERROR(status_end_element_mismatch, s);
           }
 
-          if (functions.on_element_end)
-            functions.on_element_end(gsl::ensure_z(cursor->name));
+          on_element_end(cursor);
 
           PUGI__POPNODE(); // Pop.
 
