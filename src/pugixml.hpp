@@ -38,6 +38,10 @@
 #include <string>
 #endif
 
+#include <functional>
+
+#include <gsl.h>
+
 // Macro for deprecated features
 #ifndef PUGIXML_DEPRECATED
 #if defined(__GNUC__)
@@ -267,6 +271,33 @@ namespace pugi
   class xpath_query;
   class xpath_variable_set;
 #endif
+
+  struct xml_functions
+  {
+    std::function<void(const gsl::string_span<> name,
+                       const gsl::span<std::pair<gsl::string_span<>, gsl::string_span<>>>
+                         attributes)> on_xml_decl = {};
+
+    std::function<void(const gsl::string_span<> data)> on_doc_type_start = {};
+
+    std::function<void()> on_doc_type_end = {};
+
+    std::function<void(const gsl::string_span<> name,
+                       const gsl::span<std::pair<gsl::string_span<>, gsl::string_span<>>>
+                         attributes)> on_element_start = {};
+
+    std::function<void(const gsl::string_span<> name)> on_element_end = {};
+
+    std::function<void(const gsl::string_span<> data)> on_character_data = {};
+
+    std::function<void(const gsl::string_span<> data)> on_comment = {};
+
+    std::function<void()> on_cdata_start = {};
+
+    std::function<void()> on_cdata_end = {};
+
+    std::function<void(const gsl::string_span<> data)> on_pi = {};
+  };
 
   // Range-based for loop support
   template <typename It>
@@ -1017,6 +1048,8 @@ namespace pugi
   class PUGIXML_CLASS xml_document : public xml_node
   {
   private:
+    xml_functions functions_;
+
     char_t * _buffer;
 
     char _memory[192];
@@ -1040,6 +1073,8 @@ namespace pugi
 
     // Removes all nodes, then copies the entire contents of the specified document
     void reset(const xml_document & proto);
+
+    void functions(const xml_functions functions);
 
 #ifndef PUGIXML_NO_STL
     // Load document from stream.
