@@ -40,6 +40,8 @@
 #include <string>
 #endif
 
+#include <vector>
+
 // For placement new
 #include <new>
 
@@ -3061,6 +3063,8 @@ struct xml_parser
   char_t * error_offset;
   xml_parse_status error_status;
 
+  xml_functions functions;
+
   xml_parser(xml_allocator * alloc_)
     : alloc(*alloc_), alloc_state(alloc_), error_offset(0), error_status(status_ok)
   {
@@ -3237,12 +3241,18 @@ struct xml_parser
       }
       else
         PUGI__THROW_ERROR(status_bad_comment, s);
+
+      if (PUGI__OPTSET(parse_comments) && functions.on_comment)
+        functions.on_comment(gsl::ensure_z(cursor->value));
     }
     else if (*s == '[')
     {
       // '<![CDATA[...'
       if (*++s == 'C' && *++s == 'D' && *++s == 'A' && *++s == 'T' && *++s == 'A' && *++s == '[')
       {
+        if (PUGI__OPTSET(parse_cdata) && functions.on_cdata_start)
+          functions.on_cdata_start();
+
         ++s;
 
         if (PUGI__OPTSET(parse_cdata))
@@ -3265,6 +3275,9 @@ struct xml_parser
 
             *s++ = 0; // Zero-terminate this segment.
           }
+
+          if (functions.on_character_data)
+            functions.on_character_data(gsl::ensure_z(cursor->value));
         }
         else // Flagged for discard, but we still have to scan for the terminator.
         {
@@ -3276,6 +3289,9 @@ struct xml_parser
         }
 
         s += (s[1] == '>' ? 2 : 1); // Step over the last ']>'.
+
+        if (PUGI__OPTSET(parse_cdata) && functions.on_cdata_end)
+          functions.on_cdata_end();
       }
       else
         PUGI__THROW_ERROR(status_bad_cdata, s);
@@ -3306,6 +3322,12 @@ struct xml_parser
         PUGI__PUSHNODE(node_doctype);
 
         cursor->value = mark;
+
+        if (functions.on_doc_type_start)
+          functions.on_doc_type_start(gsl::ensure_z(cursor->value));
+
+        if (functions.on_doc_type_end)
+          functions.on_doc_type_end();
       }
     }
     else if (*s == 0 && endch == '-')
@@ -3330,6 +3352,9 @@ struct xml_parser
 
     // read PI target
     char_t * target = s;
+
+    // used for PI value
+    char_t * value = nullptr;
 
     if (!PUGI__IS_CHARTYPE(*s, ct_start_symbol))
       PUGI__THROW_ERROR(status_bad_pi, s);
@@ -3375,7 +3400,7 @@ struct xml_parser
         PUGI__SKIPWS();
 
         // scan for tag end
-        char_t * value = s;
+        value = s;
 
         PUGI__SCANFOR(s[0] == '?' && PUGI__ENDSWITH(s[1], '>'));
         PUGI__CHECK_ERROR(status_bad_pi, s);
@@ -3416,6 +3441,9 @@ struct xml_parser
     // store from registers
     ref_cursor = cursor;
 
+    if (!declaration && PUGI__OPTSET(parse_pi) && functions.on_pi)
+      functions.on_pi(gsl::ensure_z(value));
+
     return s;
   }
 
@@ -3446,11 +3474,17 @@ struct xml_parser
 
           if (ch == '>')
           {
+            if (PUGI__NODETYPE(cursor) == node_element && functions.on_element_start)
+              functions.on_element_start(
+                gsl::ensure_z(cursor->name),
+                gsl::span<std::pair<gsl::string_span<>, gsl::string_span<>>>{});
+
             // end of tag
           }
           else if (PUGI__IS_CHARTYPE(ch, ct_space))
           {
           LOC_ATTRIBUTES:
+            auto attributes = std::vector<std::pair<gsl::string_span<>, gsl::string_span<>>>{};
             while (true)
             {
               PUGI__SKIPWS(); // Eat any whitespace.
@@ -3501,19 +3535,39 @@ struct xml_parser
                 }
                 else
                   PUGI__THROW_ERROR(status_bad_attribute, s);
+
+                attributes.emplace_back(
+                  std::make_pair(gsl::ensure_z(a->name), gsl::ensure_z(a->value)));
               }
               else if (*s == '/')
               {
                 ++s;
 
+                if (PUGI__NODETYPE(cursor) == node_element && functions.on_element_start)
+                  functions.on_element_start(gsl::ensure_z(cursor->name), attributes);
+
                 if (*s == '>')
                 {
+                  if (PUGI__NODETYPE(cursor) == node_declaration &&
+                      PUGI__OPTSET(parse_declaration) && functions.on_xml_decl)
+                    functions.on_xml_decl(gsl::ensure_z(cursor->name), attributes);
+
+                  if (PUGI__NODETYPE(cursor) != node_declaration && functions.on_element_end)
+                    functions.on_element_end(gsl::ensure_z(cursor->name));
+
                   PUGI__POPNODE();
                   s++;
                   break;
                 }
                 else if (*s == 0 && endch == '>')
                 {
+                  if (PUGI__NODETYPE(cursor) == node_declaration &&
+                      PUGI__OPTSET(parse_declaration) && functions.on_xml_decl)
+                    functions.on_xml_decl(gsl::ensure_z(cursor->name), attributes);
+
+                  if (PUGI__NODETYPE(cursor) != node_declaration && functions.on_element_end)
+                    functions.on_element_end(gsl::ensure_z(cursor->name));
+
                   PUGI__POPNODE();
                   break;
                 }
@@ -3524,10 +3578,16 @@ struct xml_parser
               {
                 ++s;
 
+                if (PUGI__NODETYPE(cursor) == node_element && functions.on_element_start)
+                  functions.on_element_start(gsl::ensure_z(cursor->name), attributes);
+
                 break;
               }
               else if (*s == 0 && endch == '>')
               {
+                if (PUGI__NODETYPE(cursor) == node_element && functions.on_element_start)
+                  functions.on_element_start(gsl::ensure_z(cursor->name), attributes);
+
                 break;
               }
               else
@@ -3540,6 +3600,14 @@ struct xml_parser
           {
             if (!PUGI__ENDSWITH(*s, '>'))
               PUGI__THROW_ERROR(status_bad_start_element, s);
+
+            if (PUGI__NODETYPE(cursor) == node_element && functions.on_element_start)
+              functions.on_element_start(
+                gsl::ensure_z(cursor->name),
+                gsl::span<std::pair<gsl::string_span<>, gsl::string_span<>>>{});
+
+            if (functions.on_element_end)
+              functions.on_element_end(gsl::ensure_z(cursor->name));
 
             PUGI__POPNODE(); // Pop.
 
@@ -3561,6 +3629,7 @@ struct xml_parser
           ++s;
 
           char_t * name = cursor->name;
+
           if (!name)
             PUGI__THROW_ERROR(status_end_element_mismatch, s);
 
@@ -3577,6 +3646,9 @@ struct xml_parser
             else
               PUGI__THROW_ERROR(status_end_element_mismatch, s);
           }
+
+          if (functions.on_element_end)
+            functions.on_element_end(gsl::ensure_z(cursor->name));
 
           PUGI__POPNODE(); // Pop.
 
@@ -3601,6 +3673,7 @@ struct xml_parser
             return s;
 
           assert(cursor);
+
           if (PUGI__NODETYPE(cursor) == node_declaration)
             goto LOC_ATTRIBUTES;
         }
@@ -3654,11 +3727,14 @@ struct xml_parser
             PUGI__PUSHNODE(node_pcdata); // Append a new node on the tree.
 
             cursor->value = s; // Save the offset.
-
             PUGI__POPNODE(); // Pop since this is a standalone.
           }
 
+          char * const s_tmp = s;
           s = strconv_pcdata(s);
+
+          if (functions.on_character_data)
+            functions.on_character_data(gsl::ensure_z(s_tmp));
 
           if (!*s)
             break;
@@ -3668,7 +3744,6 @@ struct xml_parser
           PUGI__SCANFOR(*s == '<'); // '...<'
           if (!*s)
             break;
-
           ++s;
         }
 
@@ -3711,7 +3786,8 @@ struct xml_parser
   }
 
   static xml_parse_result parse(char_t * buffer, size_t length, xml_document_struct * xmldoc,
-                                xml_node_struct * root, unsigned int optmsk)
+                                xml_node_struct * root, unsigned int optmsk,
+                                xml_functions functions)
   {
     // early-out for empty documents
     if (length == 0)
@@ -3724,6 +3800,8 @@ struct xml_parser
 
     // create parser on stack
     xml_parser parser(static_cast<xml_allocator *>(xmldoc));
+
+    parser.functions = functions;
 
     // save last character and make buffer zero-terminated (speeds up parsing)
     char_t endch = buffer[length - 1];
@@ -4987,7 +5065,7 @@ PUGI__FN bool set_value_convert(String & dest, Header & header, uintptr_t header
 PUGI__FN xml_parse_result load_buffer_impl(xml_document_struct * doc, xml_node_struct * root,
                                            void * contents, size_t size, unsigned int options,
                                            xml_encoding encoding, bool is_mutable, bool own,
-                                           char_t ** out_buffer)
+                                           char_t ** out_buffer, xml_functions functions)
 {
   // check input buffer
   if (!contents && size)
@@ -5015,7 +5093,7 @@ PUGI__FN xml_parse_result load_buffer_impl(xml_document_struct * doc, xml_node_s
   doc->buffer = buffer;
 
   // parse
-  xml_parse_result res = impl::xml_parser::parse(buffer, length, doc, root, options);
+  xml_parse_result res = impl::xml_parser::parse(buffer, length, doc, root, options, functions);
 
   // remember encoding
   res.encoding = buffer_encoding;
@@ -5095,7 +5173,7 @@ PUGI__FN size_t zero_terminate_buffer(void * buffer, size_t size, xml_encoding e
 
 PUGI__FN xml_parse_result load_file_impl(xml_document_struct * doc, FILE * file,
                                          unsigned int options, xml_encoding encoding,
-                                         char_t ** out_buffer)
+                                         char_t ** out_buffer, xml_functions functions)
 {
   if (!file)
     return make_parse_result(status_file_not_found);
@@ -5125,7 +5203,7 @@ PUGI__FN xml_parse_result load_file_impl(xml_document_struct * doc, FILE * file,
   xml_encoding real_encoding = get_buffer_encoding(encoding, contents, size);
 
   return load_buffer_impl(doc, doc, contents, zero_terminate_buffer(contents, size, real_encoding),
-                          options, real_encoding, true, true, out_buffer);
+                          options, real_encoding, true, true, out_buffer, functions);
 }
 
 PUGI__FN void close_file(FILE * file) { fclose(file); }
@@ -5274,7 +5352,8 @@ PUGI__FN xml_parse_status load_stream_data_seek(std::basic_istream<T> & stream, 
 template <typename T>
 PUGI__FN xml_parse_result load_stream_impl(xml_document_struct * doc,
                                            std::basic_istream<T> & stream, unsigned int options,
-                                           xml_encoding encoding, char_t ** out_buffer)
+                                           xml_encoding encoding, char_t ** out_buffer,
+                                           xml_functions functions)
 {
   void * buffer = 0;
   size_t size = 0;
@@ -5301,7 +5380,7 @@ PUGI__FN xml_parse_result load_stream_impl(xml_document_struct * doc,
   xml_encoding real_encoding = get_buffer_encoding(encoding, buffer, size);
 
   return load_buffer_impl(doc, doc, buffer, zero_terminate_buffer(buffer, size, real_encoding),
-                          options, real_encoding, true, true, out_buffer);
+                          options, real_encoding, true, true, out_buffer, functions);
 }
 #endif
 
@@ -6514,7 +6593,7 @@ namespace pugi
     impl::name_null_sentry sentry(_root);
 
     return impl::load_buffer_impl(doc, _root, const_cast<void *>(contents), size, options, encoding,
-                                  false, false, &extra->buffer);
+                                  false, false, &extra->buffer, xml_functions{});
   }
 
   PUGI__FN xml_node xml_node::find_child_by_attribute(const char_t * name_,
@@ -6583,7 +6662,6 @@ namespace pugi
     }
 
     assert(offset == 0);
-
     return result;
   }
 #endif
@@ -7305,6 +7383,8 @@ namespace pugi
     create();
   }
 
+  PUGI__FN void xml_document::functions(xml_functions functions) { functions_ = functions; }
+
   PUGI__FN void xml_document::reset(const xml_document & proto)
   {
     reset();
@@ -7407,7 +7487,7 @@ namespace pugi
     reset();
 
     return impl::load_stream_impl(static_cast<impl::xml_document_struct *>(_root), stream, options,
-                                  encoding, &_buffer);
+                                  encoding, &_buffer, functions_);
   }
 
   PUGI__FN xml_parse_result xml_document::load(
@@ -7416,7 +7496,7 @@ namespace pugi
     reset();
 
     return impl::load_stream_impl(static_cast<impl::xml_document_struct *>(_root), stream, options,
-                                  encoding_wchar, &_buffer);
+                                  encoding_wchar, &_buffer, functions_);
   }
 #endif
 
@@ -7446,7 +7526,7 @@ namespace pugi
     auto_deleter<FILE> file(fopen(path_, "rb"), impl::close_file);
 
     return impl::load_file_impl(static_cast<impl::xml_document_struct *>(_root), file.data, options,
-                                encoding, &_buffer);
+                                encoding, &_buffer, functions_);
   }
 
   PUGI__FN xml_parse_result xml_document::load_file(const wchar_t * path_, unsigned int options,
@@ -7458,7 +7538,7 @@ namespace pugi
     auto_deleter<FILE> file(impl::open_file_wide(path_, L"rb"), impl::close_file);
 
     return impl::load_file_impl(static_cast<impl::xml_document_struct *>(_root), file.data, options,
-                                encoding, &_buffer);
+                                encoding, &_buffer, functions_);
   }
 
   PUGI__FN xml_parse_result xml_document::load_buffer(const void * contents, size_t size,
@@ -7468,7 +7548,7 @@ namespace pugi
 
     return impl::load_buffer_impl(static_cast<impl::xml_document_struct *>(_root), _root,
                                   const_cast<void *>(contents), size, options, encoding, false,
-                                  false, &_buffer);
+                                  false, &_buffer, functions_);
   }
 
   PUGI__FN xml_parse_result xml_document::load_buffer_inplace(void * contents, size_t size,
@@ -7478,7 +7558,7 @@ namespace pugi
     reset();
 
     return impl::load_buffer_impl(static_cast<impl::xml_document_struct *>(_root), _root, contents,
-                                  size, options, encoding, true, false, &_buffer);
+                                  size, options, encoding, true, false, &_buffer, functions_);
   }
 
   PUGI__FN xml_parse_result xml_document::load_buffer_inplace_own(void * contents, size_t size,
@@ -7488,7 +7568,7 @@ namespace pugi
     reset();
 
     return impl::load_buffer_impl(static_cast<impl::xml_document_struct *>(_root), _root, contents,
-                                  size, options, encoding, true, true, &_buffer);
+                                  size, options, encoding, true, true, &_buffer, functions_);
   }
 
   PUGI__FN void xml_document::save(xml_writer & writer, const char_t * indent, unsigned int flags,
