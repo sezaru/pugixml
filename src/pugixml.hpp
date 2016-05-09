@@ -297,6 +297,12 @@ namespace pugi
     std::function<void()> on_cdata_end = {};
 
     std::function<void(const gsl::string_span<> data)> on_pi = {};
+
+    std::function<void(const gsl::string_span<> prefix, const gsl::string_span<> uri)>
+      on_namespace_start = {};
+
+    std::function<void(const gsl::string_span<> prefix, const gsl::string_span<> uri)>
+      on_namespace_end = {};
   };
 
   // Range-based for loop support
